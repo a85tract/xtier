@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: GPL-2.0
+xtier: export a range migration helper for the placement engine
+
+The xTier executor module decides which pages belong on which memory tier
+and moves them. It runs in kthread context and migrates pages belonging to
+another process, and nothing suitable for that is exported to modules: the
+migration entry points in mm/ are internal, and move_pages(2) is a syscall
+on the calling task.
+
+Add xtier_migrate_range(), which queues the pages in a virtual address
+range and migrates them to a target node, and export it GPL-only. The
+module is unusable without it -- insmod fails on an unresolved symbol.
+
+This is the only change xTier itself requires.
+
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -3496,6 +3496,94 @@
+ 	return 0;
+ }
+ 
++
++/*
++ * xTier: migrate a virtual address range on behalf of the placement engine.
++ *
++ * The executor module runs in kthread context and has to move pages belonging
++ * to another process. Nothing suitable is exported to modules, so wrap the
++ * queue-and-migrate sequence here.
++ */
++static struct folio *xtier_alloc_folio(struct folio *src, unsigned long private)
++{
++	int nid = (int)private;
++
++	/*
++	 * Allocate at the source order so huge pages are not silently split,
++	 * and with __GFP_THISNODE so that a full target tier fails the
++	 * migration rather than falling back to the source node.
++	 */
++	gfp_t gfp = GFP_HIGHUSER_MOVABLE | __GFP_THISNODE;
++
++	return __folio_alloc_node(gfp, folio_order(src), nid);
++}
++
++/**
++ * xtier_migrate_range - migrate a virtual address range to a target node
++ * @mm: mm_struct of the target process; the caller must hold a reference
++ * @start: start virtual address
++ * @end: end virtual address, exclusive
++ * @target_node: destination NUMA node
++ *
++ * Safe to call from a kernel thread.
++ *
++ * Return: number of pages migrated, or a negative errno.
++ */
++long xtier_migrate_range(struct mm_struct *mm, unsigned long start,
++			 unsigned long end, int target_node)
++{
++	LIST_HEAD(pagelist);
++	unsigned int nr_succeeded = 0;
++	/*
++	 * queue_pages_range() dereferences the nodemask unconditionally, so
++	 * pass every memory node rather than NULL.
++	 */
++	nodemask_t nodes = node_states[N_MEMORY];
++	int err;
++
++	if (!mm)
++		return -EINVAL;
++
++	if (target_node < 0 || target_node >= MAX_NUMNODES ||
++	    !node_online(target_node))
++		return -EINVAL;
++
++	start &= PAGE_MASK;
++	end = PAGE_ALIGN(end);
++	if (start >= end)
++		return 0;
++
++	if (mmap_read_lock_killable(mm))
++		return -EINTR;
++	err = queue_pages_range(mm, start, end, &nodes, MPOL_MF_MOVE,
++				&pagelist);
++	mmap_read_unlock(mm);
++
++	/*
++	 * A positive return counts pages that could not be isolated, which is
++	 * routine. Only a negative value is an error.
++	 */
++	if (err < 0)
++		goto out_putback;
++
++	if (list_empty(&pagelist))
++		return 0;
++
++	err = migrate_pages(&pagelist, xtier_alloc_folio, NULL,
++			    (unsigned long)target_node, MIGRATE_SYNC_LIGHT,
++			    MR_NUMA_MISPLACED, &nr_succeeded);
++
++out_putback:
++	if (!list_empty(&pagelist))
++		putback_movable_pages(&pagelist);
++
++	if (err < 0)
++		return err;
++
++	return (long)nr_succeeded;
++}
++EXPORT_SYMBOL_GPL(xtier_migrate_range);
++
+ static void mempolicy_kobj_release(struct kobject *kobj)
+ {
+ 	u8 *old;
+--- a/include/linux/mempolicy.h
++++ b/include/linux/mempolicy.h
+@@ -299,4 +299,9 @@
+ }
+ 
+ #endif /* CONFIG_NUMA */
++
++/* xTier placement engine: migrate a range on behalf of the executor module. */
++long xtier_migrate_range(struct mm_struct *mm, unsigned long start,
++			 unsigned long end, int target_node);
++
+ #endif

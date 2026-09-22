@@ -1,0 +1,4 @@
+Trained models land here.
+
+Nothing is shipped: a model is trained on features collected from your own
+workload, on your own hardware, at your own DRAM:CXL ratio. See ../README.md.

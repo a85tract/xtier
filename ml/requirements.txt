@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+torch>=2.0
+pandas>=1.5
+numpy>=1.23
+scikit-learn>=1.2

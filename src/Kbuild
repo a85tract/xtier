@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Read by kbuild for `make -C $(KDIR) M=$(PWD)/src modules`.
+
+obj-m := xtier_executor.o
+
+ccflags-y += -g -O2
